@@ -1,11 +1,12 @@
 package gracefulshutdown
 
 import (
-	"TylerTang06/gracefulshutdown/service"
 	"context"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/TylerTang06/go-advance/ctx/graceful_shutdown/service"
 )
 
 func main() {
