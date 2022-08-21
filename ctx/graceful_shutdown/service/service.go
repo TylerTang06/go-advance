@@ -4,7 +4,21 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
+)
+
+const (
+	SHOUTDOWN_TIMEOUT = 30
+	WAIT_TIMEOUT      = 10
+	CB_TIMEOUT        = 3
+)
+
+var (
+	SIGNALS = []os.Signal{syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGINT, os.Kill, os.Interrupt}
 )
 
 // 典型的 Option 设计模式
@@ -17,7 +31,9 @@ type ShutdownCallback func(ctx context.Context)
 
 // 你需要实现这个方法
 func WithShutdownCallbacks(cbs ...ShutdownCallback) Option {
-	panic("implement me")
+	return func(app *App) {
+		app.cbs = append(app.cbs, cbs...)
+	}
 }
 
 // 这里我已经预先定义好了各种可配置字段
@@ -29,6 +45,7 @@ type App struct {
 
 	// 优雅退出时候等待处理已有请求时间，默认10秒钟
 	waitTime time.Duration
+
 	// 自定义回调超时时间，默认三秒钟
 	cbTimeout time.Duration
 
@@ -37,12 +54,27 @@ type App struct {
 
 // NewApp 创建 App 实例，注意设置默认值，同时使用这些选项
 func NewApp(servers []*Server, opts ...Option) *App {
-	panic("implement me")
+	// panic("implement me")
+	// TODO:
+	app := &App{
+		servers:         servers,
+		shutdownTimeout: SHOUTDOWN_TIMEOUT,
+		waitTime:        SHOUTDOWN_TIMEOUT,
+		cbTimeout:       CB_TIMEOUT,
+		cbs:             []ShutdownCallback{},
+	}
+	for _, opt := range opts {
+		opt(app)
+	}
+
+	return app
 }
 
 // StartAndServe 你主要要实现这个方法
 func (app *App) StartAndServe() {
+	wg := sync.WaitGroup{}
 	for _, s := range app.servers {
+		wg.Add(1)
 		srv := s
 		go func() {
 			if err := srv.Start(); err != nil {
@@ -51,28 +83,65 @@ func (app *App) StartAndServe() {
 				} else {
 					log.Printf("服务器%s异常退出", srv.name)
 				}
-
+				wg.Done()
 			}
 		}()
 	}
+
 	// 从这里开始优雅退出监听系统信号，强制退出以及超时强制退出。
 	// 优雅退出的具体步骤在 shutdown 里面实现
 	// 所以你需要在这里恰当的位置，调用 shutdown
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, SIGNALS...)
+	wg.Add(1)
+	go func() {
+		select {
+		case <-c:
+			app.shutdown()
+		}
+	}()
+	wg.Wait()
 }
 
 // shutdown 你要设计这里面的执行步骤。
 func (app *App) shutdown() {
 	log.Println("开始关闭应用，停止接收新请求")
 	// 你需要在这里让所有的 server 拒绝新请求
+	for _, srv := range app.servers {
+		srv.rejectReq()
+	}
 
 	log.Println("等待正在执行请求完结")
 	// 在这里等待一段时间
+	time.Sleep(app.waitTime)
 
 	log.Println("开始关闭服务器")
 	// 并发关闭服务器，同时要注意协调所有的 server 都关闭之后才能步入下一个阶段
+	ctx, cancel := context.WithTimeout(context.Background(), app.shutdownTimeout)
+	for _, srv := range app.servers {
+		go func() {
+			srv := srv
+			srv.stop()
+		}()
+	}
+
+	select {
+	case <-ctx.Done():
+		cancel()
+	}
 
 	log.Println("开始执行自定义回调")
 	// 并发执行回调，要注意协调所有的回调都执行完才会步入下一个阶段
+	ctx, cancel = context.WithTimeout(context.Background(), app.cbTimeout)
+	for _, cb := range app.cbs {
+		cb := cb
+		cb(ctx)
+	}
+
+	select {
+	case <-ctx.Done():
+		cancel()
+	}
 
 	// 释放资源
 	log.Println("开始释放资源")
