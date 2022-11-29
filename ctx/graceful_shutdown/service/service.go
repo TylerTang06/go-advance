@@ -98,6 +98,7 @@ func (app *App) StartAndServe() {
 		select {
 		case <-c:
 			app.shutdown()
+			wg.Done()
 		}
 	}()
 	wg.Wait()
@@ -119,9 +120,9 @@ func (app *App) shutdown() {
 	// 并发关闭服务器，同时要注意协调所有的 server 都关闭之后才能步入下一个阶段
 	ctx, cancel := context.WithTimeout(context.Background(), app.shutdownTimeout)
 	for _, srv := range app.servers {
+		s := srv
 		go func() {
-			srv := srv
-			srv.stop()
+			s.stop()
 		}()
 	}
 
